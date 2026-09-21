@@ -207,14 +207,18 @@
     <div class="panel" id="panel-youtube">
       <div class="capture">
         <h2>Capture a YouTube video</h2>
-        <div class="help">Paste the video link. Then open the transcript on YouTube: under the video, click <b>...more</b> in the description, then <b>Show transcript</b>. Select all the transcript text, copy it, and paste it below. (Level 3 automates this.)</div>
+        <div class="help">Paste the link and click Capture. Your server fetches the transcript for you. If a video has no captions, you get its description instead, clearly labelled.</div>
         <div class="field"><input type="url" id="ytUrl" placeholder="https://www.youtube.com/watch?v=..." oninput="ytLookup()"></div>
         <div class="yt-preview" id="ytPreview"><img id="ytThumb" alt=""><div class="yt-title" id="ytTitle"></div></div>
-        <div class="row" style="margin:0 0 12px"><a id="ytOpen" href="#" target="_blank" rel="noopener" style="display:none"><button type="button" class="secondary">Open video to get transcript ↗</button></a></div>
-        <textarea id="ytText" placeholder="Paste the transcript here..." rows="6"></textarea>
-        <div class="row">
-          <button id="ytBtn" onclick="saveYouTube()">Save to Brain</button>
+        <div class="row" style="margin-top:0">
+          <button id="ytBtn" onclick="captureYouTube()">Capture</button>
+          <button class="link-btn" onclick="toggleManual('yt')">Paste transcript manually instead</button>
           <span class="save-msg" id="ytMsg"></span>
+        </div>
+        <div id="ytManual" style="display:none;margin-top:14px">
+          <div class="help">Open the video, click <b>...more</b> under it, then <b>Show transcript</b>. Copy the text and paste it here.</div>
+          <textarea id="ytText" placeholder="Paste the transcript here..." rows="6"></textarea>
+          <div class="row"><button id="ytManualBtn" onclick="saveYouTube()">Save pasted transcript</button></div>
         </div>
       </div>
     </div>
@@ -241,12 +245,16 @@
     <div class="panel" id="panel-url">
       <div class="capture">
         <h2>Capture an article or web page</h2>
-        <div class="help">Browsers do not let a web page read other websites, so for now: paste the address, then open the article, select its text, copy it, and paste it below. (Level 3 automates this.)</div>
+        <div class="help">Paste the address and click Capture. Your server fetches the page and keeps the readable text. Pages that need a login or build themselves with JavaScript may not work; use manual paste for those.</div>
         <div class="field"><input type="url" id="urlInput" placeholder="https://..."></div>
-        <textarea id="urlText" placeholder="Paste the article text here..." rows="6"></textarea>
-        <div class="row">
-          <button id="urlBtn" onclick="saveUrl()">Save to Brain</button>
+        <div class="row" style="margin-top:0">
+          <button id="urlBtn" onclick="captureUrl()">Capture</button>
+          <button class="link-btn" onclick="toggleManual('url')">Paste text manually instead</button>
           <span class="save-msg" id="urlMsg"></span>
+        </div>
+        <div id="urlManual" style="display:none;margin-top:14px">
+          <textarea id="urlText" placeholder="Paste the article text here..." rows="6"></textarea>
+          <div class="row"><button id="urlManualBtn" onclick="saveUrl()">Save pasted text</button></div>
         </div>
       </div>
     </div>
@@ -532,7 +540,60 @@
     })
   }
 
-  // ---------- youtube ----------
+  // ---------- server-side capture (Level 3 edge functions) ----------
+  function toggleManual(which) {
+    const el = document.getElementById(which + 'Manual')
+    el.style.display = el.style.display === 'none' ? 'block' : 'none'
+  }
+  async function callFunction(name, body) {
+    const { data: { session } } = await db.auth.getSession()
+    if (!session) throw new Error('Not signed in')
+    const r = await fetch(SUPABASE_URL + '/functions/v1/' + name, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY, 'Authorization': 'Bearer ' + session.access_token },
+      body: JSON.stringify(body)
+    })
+    let out = null
+    try { out = await r.json() } catch (e) {}
+    if (!r.ok || !out || !out.ok) throw new Error((out && out.error) || ('Server error ' + r.status))
+    return out
+  }
+  async function captureYouTube() {
+    const urlBox = document.getElementById('ytUrl')
+    if (!ytId(urlBox.value)) { setMsg('ytMsg', 'Paste a valid YouTube link first.', false); return }
+    const btn = document.getElementById('ytBtn')
+    btn.disabled = true; btn.textContent = 'Fetching...'
+    setMsg('ytMsg', 'Fetching transcript (can take up to 30 seconds)...')
+    try {
+      const out = await callFunction('capture-youtube', { url: urlBox.value.trim() })
+      setMsg('ytMsg', '✓ Saved: ' + out.title + (out.has_transcript ? '' : ' (description only, no captions)'), true)
+      urlBox.value = ''; ytInfo = null
+      document.getElementById('ytPreview').style.display = 'none'
+      await load()
+    } catch (e) {
+      setMsg('ytMsg', '✗ ' + e.message + ' — try pasting the transcript manually.', false)
+      document.getElementById('ytManual').style.display = 'block'
+    } finally { btn.disabled = false; btn.textContent = 'Capture' }
+  }
+  async function captureUrl() {
+    const urlBox = document.getElementById('urlInput')
+    const url = urlBox.value.trim()
+    if (!/^https?:\/\//i.test(url)) { setMsg('urlMsg', 'Enter a full address starting with http:// or https://', false); return }
+    const btn = document.getElementById('urlBtn')
+    btn.disabled = true; btn.textContent = 'Fetching...'
+    setMsg('urlMsg', 'Fetching page...')
+    try {
+      const out = await callFunction('capture-url', { url })
+      setMsg('urlMsg', '✓ Saved: ' + out.title + ' (' + out.chars.toLocaleString() + ' characters)', true)
+      urlBox.value = ''
+      await load()
+    } catch (e) {
+      setMsg('urlMsg', '✗ ' + e.message, false)
+      document.getElementById('urlManual').style.display = 'block'
+    } finally { btn.disabled = false; btn.textContent = 'Capture' }
+  }
+
+  // ---------- youtube (manual fallback) ----------
   let ytInfo = null
   function ytId(url) {
     const m = String(url).match(/(?:v=|youtu\.be\/|shorts\/|embed\/|live\/)([A-Za-z0-9_-]{11})/)
@@ -544,12 +605,9 @@
     ytTimer = setTimeout(async () => {
       const id = ytId(document.getElementById('ytUrl').value)
       const preview = document.getElementById('ytPreview')
-      const open = document.getElementById('ytOpen')
       ytInfo = null
-      if (!id) { preview.style.display = 'none'; open.style.display = 'none'; return }
+      if (!id) { preview.style.display = 'none'; return }
       const watch = 'https://www.youtube.com/watch?v=' + id
-      open.href = watch
-      open.style.display = 'inline-block'
       ytInfo = { id, title: 'YouTube video ' + id, thumb: 'https://img.youtube.com/vi/' + id + '/hqdefault.jpg' }
       const endpoints = [
         'https://www.youtube.com/oembed?format=json&url=' + encodeURIComponent(watch),
@@ -576,14 +634,13 @@
     if (!id) { setMsg('ytMsg', 'Paste a valid YouTube link first.', false); return }
     if (!transcript) { setMsg('ytMsg', 'Paste the transcript first.', false); return }
     const title = ytInfo && ytInfo.id === id ? ytInfo.title : 'YouTube video ' + id
-    await withButton('ytBtn', 'ytMsg', async () => {
+    await withButton('ytManualBtn', 'ytMsg', async () => {
       const content = '📹 YouTube: ' + title + '\nhttps://www.youtube.com/watch?v=' + id + '\n\n' + transcript
       const thoughtId = await insertThought(content, { video_id: id, title })
       await insertSource(thoughtId, transcript, 'youtube_transcript')
       urlBox.value = ''; textBox.value = ''; ytInfo = null
       document.getElementById('ytPreview').style.display = 'none'
-      document.getElementById('ytOpen').style.display = 'none'
-    })
+          })
   }
 
   // ---------- pdf ----------
@@ -655,7 +712,7 @@
     const text = decodeEntities(textBox.value.trim())
     if (!/^https?:\/\//i.test(url)) { setMsg('urlMsg', 'Enter a full address starting with http:// or https://', false); return }
     if (!text) { setMsg('urlMsg', 'Paste the article text first.', false); return }
-    await withButton('urlBtn', 'urlMsg', async () => {
+    await withButton('urlManualBtn', 'urlMsg', async () => {
       const thoughtId = await insertThought('🔗 URL: ' + url + '\n\n' + text, { url })
       await insertSource(thoughtId, text, 'web')
       urlBox.value = ''; textBox.value = ''
